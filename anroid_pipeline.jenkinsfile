@@ -1,0 +1,315 @@
+pipeline {
+    agent any
+    environment {
+        APP_BASE_PATH="/var/lib/jenkins/jobs/MyApplication"
+        JOB_PATH="/var/lib/jenkins/jobs/android"
+        APP_MODULE_NAME="app"
+        PACKAGE_NAME='com.example.myapplication'
+
+        SDK_PATH="/home/mohit/Android/Sdk"
+        ANDROID_SDK_ROOT="${SDK_PATH}"
+        ADB_PATH="${SDK_PATH}/platform-tool"
+        BUNDLE_TOOL_JAR_PATH="/var/lib/jenkins/bundletool"
+
+        EMU_LOCAL_TMP='/data/local/tmp'
+
+        FIRE_D_APP_ID='1:1083592230921:android:8c00f23ffc51859c5fd0d8'
+        FIRE_D_RN="Welcome to App Distribution"
+        FIRE_D_GROUPS="testers"
+    }
+
+    parameters {
+        string(defaultValue: '/var/lib/jenkins/jobs/MyApplication', description: 'Project Path', name: 'projectPath', trim: true)
+        string(defaultValue: 'release', description: 'Please put branch name', name: 'branchName', trim: true)
+        choice(choices : ['prod','staging'], description : 'Select build flavour', name: 'buildFlavour')
+        choice(choices : ['debug','release'], description : 'Select build type', name: 'buildType')
+        booleanParam(defaultValue: true, description:'Build Apk ?', name :'buildApk')
+        booleanParam(defaultValue: false, description:'Build App Bundle?', name :'bundleApk')
+
+
+        booleanParam(defaultValue: true, description:'Run Linter', name :'runLint')
+        booleanParam(defaultValue: false, description:'Run Instrumentation/UI Test', name :'runTest')
+        booleanParam(defaultValue: false, description:'Record UI Tests', name :'recordScreen')
+        booleanParam(defaultValue: true, description:'Run JUnit Test', name :'runJUnitTest')
+        booleanParam(defaultValue: false, description:'Run Monkey Test', name :'monkey')
+
+        booleanParam(defaultValue: false, description:'Clean', name :'clean')
+        booleanParam(defaultValue: false, description:'Sync', name :'sync')
+        booleanParam(defaultValue: false, description:'Clean Build Cache', name :'cleanBuildCache')
+        booleanParam(defaultValue: true, description:'Share Build on App Distribution', name :'sendBuild')
+
+        string(defaultValue: '/var/lib/jenkins/jobs/MyApplication/keystore.jks', description: 'Key File', name: 'keyFile', trim: true)
+        password(defaultValue: 'abcd1234', description: 'Store Pass', name: 'storePass')
+        password(defaultValue: 'key0', description: 'Key Alias', name: 'keyAlias')
+        password(defaultValue: 'abcd1234', description: 'Key Pass', name: 'keyPass')
+
+    }
+    
+    stages {
+        stage('Clean') {
+            steps {
+                dir("$projectPath"){
+                    sh '''
+                        # remove old builds
+                        rm -rf ${APP_BASE_PATH}/$APP_MODULE_NAME/build/outputs/
+                        rm -rf ${JOB_PATH}/artifacts/
+                        rm -rf ${APP_BASE_PATH}/$APP_MODULE_NAME/build/reports/tests/
+                    '''
+                }
+            }
+        }
+        stage('Prepare') {
+            steps {
+                dir("$projectPath"){
+                    sh '''
+                        
+                        git status
+                        git add .
+                        git stash
+                        git pull
+                        git checkout $branchName
+                        git pull origin $branchName
+
+                        # make gradlew executable if not
+                        chmod +x gradlew
+
+                        # clean project
+                        if [ $cleanBuildCache = true ]; then
+                                ./gradlew cleanBuildCache --stacktrace
+                        fi
+
+                        if [ $clean = true ]; then
+                            ./gradlew clean --stacktrace
+                        fi
+
+                        if [ $sync = true ]; then
+                                ./gradlew build --stacktrace
+                        fi
+
+
+                    '''
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                dir("$projectPath"){
+                    sh '''
+                        # build APK
+                        if [ $buildApk = true ]; then
+                            if [ $buildType = 'debug' ]; then
+                                if [ $buildFlavour = 'prod' ]; then
+                                    ./gradlew assembleProdDebug --stacktrace
+                                elif [ $buildFlavour = 'staging' ]; then
+                                    ./gradlew assembleStagingDebug --stacktrace
+                                fi
+                            elif [ $buildType = 'release' ]; then
+                                if [ $buildFlavour = 'prod' ]; then
+                                        ./gradlew assembleProdRelease --stacktrace -Pandroid.injected.signing.store.file=$keyFile -Pandroid.injected.signing.store.password=$storePass -Pandroid.injected.signing.key.alias=$keyAlias -Pandroid.injected.signing.key.password=$keyPass
+                                elif [ $buildFlavour = 'staging' ]; then
+                                        ./gradlew assembleStagingRelease --stacktrace -Pandroid.injected.signing.store.file=$keyFile -Pandroid.injected.signing.store.password=$storePass -Pandroid.injected.signing.key.alias=$keyAlias -Pandroid.injected.signing.key.password=$keyPass
+                                fi
+                            elif [ $buildType = 'testing' ]; then
+                                if [ $buildFlavour = 'prod' ]; then
+                                        ./gradlew assembleProdTesting --stacktrace
+                                elif [ $buildFlavour = 'staging' ]; then
+                                        ./gradlew assembleStagingTesting --stacktrace
+                                fi
+                            fi
+                        else
+                            echo "Not making apk"
+                        fi
+
+                        # build Bundle
+                        if [ $bundleApk = true ]; then
+                            if [ $buildType = 'debug' ]; then
+                                if [ $buildFlavour = 'prod' ]; then
+                                        ./gradlew :$APP_MODULE_NAME:bundleProdDebug --stacktrace
+                                        echo "Making AAB prod Debug"
+                                elif [ $buildFlavour = 'staging' ]; then
+                                        ./gradlew :$APP_MODULE_NAME:bundleStagingDebug --stacktrace
+                                        echo "Making AAB Staging Debug"     
+                                fi
+                            elif [ $buildType = 'release' ]; then
+                                if [ $buildFlavour = 'prod' ]; then
+                                        ./gradlew :$APP_MODULE_NAME:bundleProdRelease --stacktrace -Pandroid.injected.signing.store.file=$keyFile -Pandroid.injected.signing.store.password=$storePass 
+                                        echo "Making AAB prod release"
+                                elif [ $buildFlavour = 'staging' ]; then
+                                        ./gradlew :$APP_MODULE_NAME:bundleStagingRelease --stacktrace -Pandroid.injected.signing.store.file=$keyFile -Pandroid.injected.signing.store.password=$storePass 
+                                        echo "Making AAB staging release"
+                                fi
+                            elif [ $buildType = 'testing' ]; then
+                                if [ $buildFlavour = 'prod' ]; then
+                                        ./gradlew :$APP_MODULE_NAME:bundleProdTesting --stacktrace
+                                        echo "Making AAB prod testing"           
+                                elif [ $buildFlavour = 'staging' ]; then
+                                        ./gradlew :$APP_MODULE_NAME:bundleStagingTesting --stacktrace
+                                        echo "Making AAB staging testing"          
+                                fi
+                            fi
+                        else
+                            echo "Not making bundle apk"
+                        fi
+
+                    '''
+                }
+            }
+        }
+
+        stage ('Code Quality'){
+            steps {
+                parallel (
+                    "Lint" : {
+                        dir("$projectPath"){
+                            sh '''
+                                # lint
+                                if [ $runLint = true ]; then
+                                    ./gradlew lintProdDebug
+                                else
+                                    echo "Not running lint"
+                                fi
+                            '''
+                        }
+
+                    },
+
+                    "Unit Tests" : {
+                        dir("$projectPath"){
+                            sh '''
+                                # run junit test
+                                echo "Running JUnit Tests"
+
+                                if [ $runJUnitTest = true ]; then
+                                    if [ $buildType = 'debug' ]; then
+                                            if [ $buildFlavour = 'prod' ]; then
+                                                    ./gradlew testProdDebugUnitTest --stacktrace
+                                            elif [ $buildFlavour = 'staging' ]; then
+                                                    ./gradlew testStagingDebugUnitTest --stacktrace
+                                            fi
+                                    elif [ $buildType = 'release' ]; then
+                                            if [ $buildFlavour = 'prod' ]; then
+                                                    ./gradlew testProdDebugUnitTest --stacktrace
+                                            elif [ $buildFlavour = 'staging' ]; then
+                                                    ./gradlew testStagingDebugUnitTest --stacktrace
+                                            fi
+                                    elif [ $buildType = 'testing' ]; then
+                                            if [ $buildFlavour = 'prod' ]; then
+                                                    ./gradlew testProdDebugUnitTest --stacktrace
+                                            elif [ $buildFlavour = 'staging' ]; then
+                                                    ./gradlew testStagingDebugUnitTest --stacktrace
+                                            fi
+                                    fi
+                                else
+                                    echo "Not Running JUnit Tests"
+                                fi
+
+                                echo "Finished Running Junit tests"
+                            '''
+                        }
+                    }
+                )
+            }
+        }
+    }
+
+    post {
+
+        always {
+            script {
+                dir("$projectPath"){
+                    sh ''' 
+                        mkdir -p ${JOB_PATH}/report/test-results
+                        mkdir -p ${JOB_PATH}/artifacts
+                    '''
+
+                    if("$buildApk" == "true"){
+                        archiveArtifacts(artifacts : "$APP_MODULE_NAME/build/outputs/apk/$buildFlavour/$buildType/*.apk")
+                        if("$buildFlavour" == "prod"){
+                            def buildTy = "$buildType".capitalize()
+                            archiveArtifacts(artifacts : "$APP_MODULE_NAME/build/outputs/mapping/$buildFlavour$buildTy/mapping.txt")
+                            sh '''
+                                cp $APP_MODULE_NAME/build/outputs/apk/$buildFlavour/$buildType/*.apk ${JOB_PATH}/artifacts/send_build.apk
+
+                            '''
+                        }
+                    }
+
+                    if("$bundleApk" == "true"){
+                        def buildTy = "$buildType".capitalize()
+                        archiveArtifacts(artifacts : "$APP_MODULE_NAME/build/outputs/bundle/$buildFlavour$buildTy/*.aab")
+                        if("$buildFlavour" == "prod"){
+                            archiveArtifacts(artifacts : "$APP_MODULE_NAME/build/outputs/mapping/$buildFlavour$buildTy/mapping.txt")
+                            sh "scp $APP_MODULE_NAME/build/outputs/bundle/${buildFlavour}${buildTy}/*.aab ${JOB_PATH}/artifacts/send_build_aab.aab"
+                        }
+
+                        //extract apk from aab
+                        
+                        sh "java -jar $BUNDLE_TOOL_JAR_PATH/bundletool.jar build-apks --bundle=${JOB_PATH}/artifacts/send_build_aab.aab --output=$APP_MODULE_NAME/build/outputs/bundle/${buildFlavour}${buildTy}/Universal.apks --ks ${APP_BASE_PATH}/keystore.jks --key-pass=pass:$storePass --ks-key-alias $keyAlias --ks-pass=pass:$keyPass --overwrite --mode=universal"
+
+                        archiveArtifacts(artifacts : "$APP_MODULE_NAME/build/outputs/bundle/${buildFlavour}${buildTy}/Universal.apks")
+                    }
+
+                    sh '''
+                        # copy lint results
+                        if [ $runLint = true ]; then 
+                            if [ ! -e "$APP_MODULE_NAME/build/reports/lint-results-prodDebug.xml" ]; then
+                                echo "ERROR: File not exists: ($APP_MODULE_NAME/build/reports/lint-results-prodDebug.xml)"
+                                if [ ! -e "$APP_MODULE_NAME/build/reports/lint-results-prodDebug-fatal.xml" ]; then
+                                    echo "ERROR: File not exists: ($APP_MODULE_NAME/build/reports/lint-results-prodDebug-fatal.xml)"
+                                else 
+                                    cp $APP_MODULE_NAME/build/reports/lint-results-prodDebug-fatal.xml ${JOB_PATH}/report
+                                fi
+                            else
+                                cp $APP_MODULE_NAME/build/reports/lint-results-prodDebug.xml ${JOB_PATH}/report
+                                echo "File exists"
+                            fi
+                        else
+                            echo "Lint results not copied"
+                        fi
+
+                    '''
+                }
+            }
+
+        }
+
+        success {
+            script {
+                sh ''' 
+                    # Send Apk to App Distribution Firebase
+                    if [ $buildApk = true -a $sendBuild = true ]; then
+                        echo "Sending apk since all tests passed"
+                        /usr/local/bin/./firebase appdistribution:distribute ${JOB_PATH}/artifacts/send_build.apk --app ${FIRE_D_APP_ID} --release-notes "${FIRE_D_RN}" --groups "${FIRE_D_GROUPS}"
+                    fi
+
+                    if [ $bundleApk = true -a $sendBuild = true ]; then
+                        echo "Sending apks since all tests passed"
+                        #/usr/local/bin/./firebase appdistribution:distribute ${JOB_PATH}/artifacts/send_build_aab.aab --app ${FIRE_D_APP_ID} --release-notes "${FIRE_D_RN}" --groups "${FIRE_D_GROUPS}"
+                    fi
+                '''
+            }
+        }
+
+        failure {
+            script {
+                sh ''' 
+                    if [ $runTest = true ]; then
+                        echo "Not sending apk to app distribution since all tests didnt pass"
+                    fi
+                '''
+            }
+        }
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
