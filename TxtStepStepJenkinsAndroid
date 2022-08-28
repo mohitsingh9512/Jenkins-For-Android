@@ -31,7 +31,7 @@ nano /var/lib/jenkins/secrets/initialAdminPassword
 
 admin user
 user : jenkins
-pass : 280180
+pass : 
 name : mohit
 
 Process on port : lsof -i:9000
